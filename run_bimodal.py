@@ -44,12 +44,12 @@ from transformers import (
     set_seed,
 )
 from transformers.trainer_utils import get_last_checkpoint, is_main_process
-from transformers.utils import check_min_version
 from transformers.utils.versions import require_version
+from models.modeling_audio_visual_encoder import AvEncoderForCTC
+from preprocess.frcnn.processing_image import Preprocess
+from preprocess.frcnn.modeling_frcnn import GeneralizedRCNN
+from preprocess.frcnn.utils import Config
 
-
-# Will error if the minimal version of Transformers is not installed. Remove at your own risks.
-check_min_version("4.19.0.dev0")
 
 require_version("datasets>=1.18.0", "To fix: pip install -r examples/pytorch/speech-recognition/requirements.txt")
 
@@ -273,10 +273,12 @@ class DataCollatorCTCWithPadding:
     pad_to_multiple_of_labels: Optional[int] = None
 
     def __call__(self, features: List[Dict[str, Union[List[int], torch.Tensor]]]) -> Dict[str, torch.Tensor]:
-        # split inputs and labels since they have to be of different lenghts and need
+        # split inputs and labels since they have to be of different lengths and need
         # different padding methods
         input_features = [{"input_values": feature["input_values"]} for feature in features]
         label_features = [{"input_ids": feature["labels"]} for feature in features]
+        visual_features = torch.Tensor([feature["visual_feats"] for feature in features])
+        visual_pos = torch.Tensor([feature["visual_pos"] for feature in features])
 
         batch = self.processor.pad(
             input_features,
@@ -297,6 +299,8 @@ class DataCollatorCTCWithPadding:
         labels = labels_batch["input_ids"].masked_fill(labels_batch.attention_mask.ne(1), -100)
 
         batch["labels"] = labels
+        batch["visual_feats"] = visual_features
+        batch["visual_pos"] = visual_pos
 
         return batch
 
@@ -395,41 +399,48 @@ def main():
     # 1. First, let's load the dataset
     raw_datasets = DatasetDict()
 
-    if training_args.do_train:
-        raw_datasets["train"] = load_dataset(
-            data_args.dataset_name,
-            data_args.dataset_config_name,
-            split=data_args.train_split_name,
-            use_auth_token=data_args.use_auth_token,
-        )
+    raw_datasets["train"] = load_dataset("csv", split="train", data_files="datasets/HOW2/test.csv")
+    raw_datasets["train"] = raw_datasets["train"].cast_column("audio", datasets.features.Audio(sampling_rate=16_000))
+    #raw_datasets["train"] = raw_datasets["train"].cast_column("image", datasets.features.Image())
+    raw_datasets["eval"] = load_dataset("csv", split="eval", data_files={"eval": "datasets/HOW2/test.csv"})
+    raw_datasets["eval"] = raw_datasets["eval"].cast_column("audio", datasets.features.Audio(sampling_rate=16_000))
+    #raw_datasets["eval"] = raw_datasets["eval"].cast_column("image", datasets.features.Image())
 
-        if data_args.audio_column_name not in raw_datasets["train"].column_names:
-            raise ValueError(
-                f"--audio_column_name '{data_args.audio_column_name}' not found in dataset '{data_args.dataset_name}'. "
-                "Make sure to set `--audio_column_name` to the correct audio column - one of "
-                f"{', '.join(raw_datasets['train'].column_names)}."
-            )
+    #if training_args.do_train:
+    #    raw_datasets["train"] = load_dataset(
+    #        data_args.dataset_name,
+    #        data_args.dataset_config_name,
+    #        split=data_args.train_split_name,
+    #        use_auth_token=data_args.use_auth_token,
+    #    )
 
-        if data_args.text_column_name not in raw_datasets["train"].column_names:
-            raise ValueError(
-                f"--text_column_name {data_args.text_column_name} not found in dataset '{data_args.dataset_name}'. "
-                "Make sure to set `--text_column_name` to the correct text column - one of "
-                f"{', '.join(raw_datasets['train'].column_names)}."
-            )
+    #    if data_args.audio_column_name not in raw_datasets["train"].column_names:
+    #        raise ValueError(
+    #            f"--audio_column_name '{data_args.audio_column_name}' not found in dataset '{data_args.dataset_name}'. "
+    #            "Make sure to set `--audio_column_name` to the correct audio column - one of "
+    #            f"{', '.join(raw_datasets['train'].column_names)}."
+    #        )
 
-        if data_args.max_train_samples is not None:
-            raw_datasets["train"] = raw_datasets["train"].select(range(data_args.max_train_samples))
+    #    if data_args.text_column_name not in raw_datasets["train"].column_names:
+    #        raise ValueError(
+    #            f"--text_column_name {data_args.text_column_name} not found in dataset '{data_args.dataset_name}'. "
+    #            "Make sure to set `--text_column_name` to the correct text column - one of "
+    #            f"{', '.join(raw_datasets['train'].column_names)}."
+    #        )
 
-    if training_args.do_eval:
-        raw_datasets["eval"] = load_dataset(
-            data_args.dataset_name,
-            data_args.dataset_config_name,
-            split=data_args.eval_split_name,
-            use_auth_token=data_args.use_auth_token,
-        )
+    #    if data_args.max_train_samples is not None:
+    #        raw_datasets["train"] = raw_datasets["train"].select(range(data_args.max_train_samples))
 
-        if data_args.max_eval_samples is not None:
-            raw_datasets["eval"] = raw_datasets["eval"].select(range(data_args.max_eval_samples))
+    #if training_args.do_eval:
+    #    raw_datasets["eval"] = load_dataset(
+    #        data_args.dataset_name,
+    #        data_args.dataset_config_name,
+    #        split=data_args.eval_split_name,
+    #        use_auth_token=data_args.use_auth_token,
+    #    )
+
+    #    if data_args.max_eval_samples is not None:
+    #        raw_datasets["eval"] = raw_datasets["eval"].select(range(data_args.max_eval_samples))
 
     # 2. We remove some special characters from the datasets
     # that make training complicated and do not help in transcribing the speech
@@ -542,12 +553,8 @@ def main():
     )
 
     # create model
-    model = AutoModelForCTC.from_pretrained(
-        model_args.model_name_or_path,
-        cache_dir=model_args.cache_dir,
-        config=config,
-        use_auth_token=data_args.use_auth_token,
-    )
+    lxmert_config = AutoConfig.from_pretrained("unc-nlp/lxmert-base-uncased")
+    model = AvEncoderForCTC(config, lxmert_config)
 
     # freeze encoder
     if model_args.freeze_feature_encoder:
@@ -575,6 +582,11 @@ def main():
     phoneme_language = data_args.phoneme_language
 
     # Preprocessing the datasets.
+    frcnn_cfg = Config.from_pretrained("unc-nlp/frcnn-vg-finetuned")
+    frcnn_cfg.model.device = "cuda"
+    frcnn = GeneralizedRCNN.from_pretrained("unc-nlp/frcnn-vg-finetuned", config=frcnn_cfg)
+    image_preprocess = Preprocess(frcnn_cfg)
+
     # We need to read the audio files as arrays and tokenize the targets.
     def prepare_dataset(batch):
         # load audio
@@ -583,6 +595,20 @@ def main():
         inputs = feature_extractor(sample["array"], sampling_rate=sample["sampling_rate"])
         batch["input_values"] = inputs.input_values[0]
         batch["input_length"] = len(batch["input_values"])
+
+        # run image through FRCNN
+        images, sizes, scales_yx = image_preprocess(batch["image"])
+        output_dict = frcnn(
+            images,
+            sizes,
+            scales_yx=scales_yx,
+            padding="max_detections",
+            max_detections=frcnn_cfg.max_detections,
+            return_tensors="pt",
+            location=frcnn_cfg.model.device,
+        )
+        batch["visual_pos"] = output_dict["normalized_boxes"][0]
+        batch["visual_feats"] = output_dict["roi_features"][0]
 
         # encode targets
         additional_kwargs = {}
