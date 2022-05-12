@@ -40,7 +40,6 @@ from tqdm.auto import tqdm
 
 import cv2
 import requests
-import wget
 from filelock import FileLock
 from yaml import Loader, dump, load
 
@@ -381,9 +380,8 @@ def get_from_cache(
         # Otherwise you get corrupt cache entries if the download gets interrupted.
         with temp_file_manager() as temp_file:
             print(
-                "%s not found in cache or force_download set to True, downloading to %s",
-                url,
-                temp_file.name,
+                "%s not found in cache or force_download set to True, downloading to %s" %
+                (url, temp_file.name)
             )
 
             http_get(
@@ -518,24 +516,6 @@ def get_image_from_url(url):
     response = requests.get(url)
     img = np.array(Image.open(BytesIO(response.content)))
     return img
-
-
-# to load legacy frcnn checkpoint from detectron
-def load_frcnn_pkl_from_url(url):
-    fn = url.split("/")[-1]
-    if fn not in os.listdir(os.getcwd()):
-        wget.download(url)
-    with open(fn, "rb") as stream:
-        weights = pkl.load(stream)
-    model = weights.pop("model")
-    new = {}
-    for k, v in model.items():
-        new[k] = torch.from_numpy(v)
-        if "running_var" in k:
-            zero = torch.tensor([0])
-            k2 = k.replace("running_var", "num_batches_tracked")
-            new[k2] = zero
-    return new
 
 
 def get_demo_path():

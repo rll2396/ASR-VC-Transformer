@@ -1,0 +1,12 @@
+torch
+torchvision
+torchaudio
+transformers
+datasets
+soundfile
+librosa
+jiwer
+opencv-python
+requests
+filelock
+pyyaml

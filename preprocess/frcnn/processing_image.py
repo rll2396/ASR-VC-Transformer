@@ -23,7 +23,7 @@ import torch
 from PIL import Image
 from torch import nn
 
-from utils import img_tensorize
+from .utils import img_tensorize
 
 
 class ResizeShortestEdge:
@@ -95,7 +95,7 @@ class Preprocess:
             for size, im in zip(image_sizes, images)
         ]
 
-        return torch.stack(images), torch.tensor(image_sizes)
+        return torch.stack(images), torch.tensor(image_sizes).to(self.device)
 
     def __call__(self, images, single_image=False):
         with torch.no_grad():
@@ -114,7 +114,7 @@ class Preprocess:
                         .float(),
                     )
             # resize smallest edge
-            raw_sizes = torch.tensor([im.shape[:2] for im in images])
+            raw_sizes = torch.tensor([im.shape[:2] for im in images]).to(self.device)
             images = self.aug(images)
             # transpose images and convert to torch tensors
             # images = [torch.as_tensor(i.astype("float32")).permute(2, 0, 1).to(self.device) for i in images]
