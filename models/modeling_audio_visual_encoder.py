@@ -192,7 +192,7 @@ class AvEncoderForCTC(Wav2Vec2PreTrainedModel):
         )
 
         # Use audio output, ignore pooled and visual output
-        hidden_states = outputs[1]
+        hidden_states = outputs[0]
         hidden_states = self.dropout(hidden_states)
 
         logits = self.lm_head(hidden_states)
@@ -207,8 +207,7 @@ class AvEncoderForCTC(Wav2Vec2PreTrainedModel):
             attention_mask = (
                 attention_mask if attention_mask is not None else torch.ones_like(input_values, dtype=torch.long)
             )
-            #input_lengths = self._get_feat_extract_output_lengths(attention_mask.sum(-1)).to(torch.long)
-            input_lengths = torch.tensor([logits.size()[-2]], dtype=torch.long)
+            input_lengths = self._get_feat_extract_output_lengths(attention_mask.sum(-1)).to(torch.long)
 
             # assuming that padded tokens are filled with -100
             # when not being attended to

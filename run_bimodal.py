@@ -397,14 +397,7 @@ def main():
     set_seed(training_args.seed)
 
     # 1. First, let's load the dataset
-    raw_datasets = DatasetDict()
-
-    raw_datasets["train"] = load_dataset("csv", split="train", data_files="datasets/HOW2/test.csv")
-    raw_datasets["train"] = raw_datasets["train"].cast_column("audio", datasets.features.Audio(sampling_rate=16_000))
-    #raw_datasets["train"] = raw_datasets["train"].cast_column("image", datasets.features.Image())
-    raw_datasets["eval"] = load_dataset("csv", split="eval", data_files={"eval": "datasets/HOW2/test.csv"})
-    raw_datasets["eval"] = raw_datasets["eval"].cast_column("audio", datasets.features.Audio(sampling_rate=16_000))
-    #raw_datasets["eval"] = raw_datasets["eval"].cast_column("image", datasets.features.Image())
+    raw_datasets = load_dataset("csv", data_files={"train": "datasets/HOW2/test.csv", "eval": "datasets/HOW2/test.csv"})
 
     #if training_args.do_train:
     #    raw_datasets["train"] = load_dataset(
@@ -555,6 +548,7 @@ def main():
     # create model
     lxmert_config = AutoConfig.from_pretrained("unc-nlp/lxmert-base-uncased")
     model = AvEncoderForCTC(config, lxmert_config)
+    #model = AutoModelForCTC.from_pretrained("facebook/wav2vec2-base", config=config)
 
     # freeze encoder
     if model_args.freeze_feature_encoder:
@@ -566,11 +560,10 @@ def main():
     # via the `feature_extractor`
 
     # make sure that dataset decodes audio with correct sampling rate
-    dataset_sampling_rate = next(iter(raw_datasets.values())).features[data_args.audio_column_name].sampling_rate
-    if dataset_sampling_rate != feature_extractor.sampling_rate:
-        raw_datasets = raw_datasets.cast_column(
-            data_args.audio_column_name, datasets.features.Audio(sampling_rate=feature_extractor.sampling_rate)
-        )
+    raw_datasets["train"] = raw_datasets["train"].cast_column("audio", datasets.features.Audio(sampling_rate=feature_extractor.sampling_rate))
+    raw_datasets["eval"] = raw_datasets["eval"].cast_column("audio", datasets.features.Audio(sampling_rate=feature_extractor.sampling_rate))
+    #raw_datasets["train"] = raw_datasets["train"].cast_column("image", datasets.features.Image())
+    #raw_datasets["eval"] = raw_datasets["eval"].cast_column("image", datasets.features.Image())
 
     # derive max & min input length for sample rate & max duration
     max_input_length = data_args.max_duration_in_seconds * feature_extractor.sampling_rate
@@ -582,8 +575,10 @@ def main():
     phoneme_language = data_args.phoneme_language
 
     # Preprocessing the datasets.
+
+    # load FRCNN
     frcnn_cfg = Config.from_pretrained("unc-nlp/frcnn-vg-finetuned")
-    frcnn_cfg.model.device = "cuda"
+    frcnn_cfg.model.device = "cuda" if torch.cuda.is_available() else "cpu"
     frcnn = GeneralizedRCNN.from_pretrained("unc-nlp/frcnn-vg-finetuned", config=frcnn_cfg)
     image_preprocess = Preprocess(frcnn_cfg)
 
