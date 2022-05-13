@@ -10,3 +10,4 @@ opencv-python
 requests
 filelock
 pyyaml
+moviepy

@@ -23,6 +23,7 @@ import sys
 import warnings
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Union
+from multiprocess import set_start_method
 
 import datasets
 import numpy as np
@@ -403,9 +404,9 @@ def main():
 
     # 1. First, let's load the dataset
     data_files = {
-            "train": "datasets/HOW2/test.csv",
-            "eval": "datasets/HOW2/test.csv",
-            "test": "datasets/HOW2/test.csv",
+            "train": "datasets/HOW2/dev5.csv",
+            "eval": "datasets/HOW2/dev5.csv",
+            "test": "datasets/HOW2/dev5.csv",
     }
     raw_datasets = load_dataset("csv", data_files=data_files)
 
@@ -573,8 +574,6 @@ def main():
     raw_datasets["train"] = raw_datasets["train"].cast_column("audio", datasets.features.Audio(sampling_rate=feature_extractor.sampling_rate))
     raw_datasets["eval"] = raw_datasets["eval"].cast_column("audio", datasets.features.Audio(sampling_rate=feature_extractor.sampling_rate))
     raw_datasets["test"] = raw_datasets["test"].cast_column("audio", datasets.features.Audio(sampling_rate=feature_extractor.sampling_rate))
-    #raw_datasets["train"] = raw_datasets["train"].cast_column("image", datasets.features.Image())
-    #raw_datasets["eval"] = raw_datasets["eval"].cast_column("image", datasets.features.Image())
 
     # derive max & min input length for sample rate & max duration
     max_input_length = data_args.max_duration_in_seconds * feature_extractor.sampling_rate
@@ -587,26 +586,17 @@ def main():
 
     # Preprocessing the datasets.
 
-    # load FRCNN
-    frcnn_cfg = Config.from_pretrained("unc-nlp/frcnn-vg-finetuned")
-    frcnn_cfg.model.device = "cuda" if torch.cuda.is_available() else "cpu"
-    frcnn = GeneralizedRCNN.from_pretrained("unc-nlp/frcnn-vg-finetuned", config=frcnn_cfg)
-    image_preprocess = Preprocess(frcnn_cfg)
-
     # We need to read the audio files as arrays and tokenize the targets.
-    def prepare_dataset(batch):
-        # load audio
-        sample = batch[audio_column_name]
+    if not data_args.audio_only:
+        # load FRCNN
+        frcnn_cfg = Config.from_pretrained("unc-nlp/frcnn-vg-finetuned")
+        frcnn_cfg.model.device = "cuda" if torch.cuda.is_available() else "cpu"
+        frcnn = GeneralizedRCNN.from_pretrained("unc-nlp/frcnn-vg-finetuned", config=frcnn_cfg)
+        image_preprocess = Preprocess(frcnn_cfg)
 
-        inputs = feature_extractor(sample["array"], sampling_rate=sample["sampling_rate"])
-        batch["input_values"] = inputs.input_values[0]
-        batch["input_length"] = len(batch["input_values"])
-
-        # run image through FRCNN
-        if data_args.audio_only:
-            batch["visual_pos"] = torch.ones((36, 4), device=frcnn_cfg.model.device)
-            batch["visual_feats"] = torch.ones((36, 2048), device=frcnn_cfg.model.device)
-        else:
+        def run_frcnn(batch, rank):
+            os.environ["CUDA_VISIBLE_DEVICES"] = str(rank % torch.cuda.device_count())
+            # run image through FRCNN
             images, sizes, scales_yx = image_preprocess(batch["image"])
             output_dict = frcnn(
                 images,
@@ -619,20 +609,64 @@ def main():
             )
             batch["visual_pos"] = output_dict["normalized_boxes"][0]
             batch["visual_feats"] = output_dict["roi_features"][0]
+            del images, sizes, scales_yx, output_dict
+            return batch
 
-        # encode targets
-        additional_kwargs = {}
-        if phoneme_language is not None:
-            additional_kwargs["phonemizer_lang"] = phoneme_language
+        with training_args.main_process_first(desc="dataset map preprocessing"):
+            raw_datasets = raw_datasets.map(
+                run_frcnn,
+                remove_columns=["image"],
+                num_proc=num_workers,
+                with_rank=True,
+                desc="run frcnn",
+            )
+        def prepare_dataset(batch, rank):
+            # load audio
+            sample = batch[audio_column_name]
 
-        batch["labels"] = tokenizer(batch["target_text"], **additional_kwargs).input_ids
-        return batch
+            inputs = feature_extractor(sample["array"], sampling_rate=sample["sampling_rate"])
+            batch["input_values"] = inputs.input_values[0]
+            batch["input_length"] = len(batch["input_values"])
+
+            # encode targets
+            additional_kwargs = {}
+            if phoneme_language is not None:
+                additional_kwargs["phonemizer_lang"] = phoneme_language
+
+            batch["labels"] = tokenizer(batch["target_text"], **additional_kwargs).input_ids
+            return batch
+    else:
+        def prepare_dataset(batch, rank):
+            # load audio
+            sample = batch[audio_column_name]
+
+            inputs = feature_extractor(sample["array"], sampling_rate=sample["sampling_rate"])
+            batch["input_values"] = inputs.input_values[0]
+            batch["input_length"] = len(batch["input_values"])
+
+            # clear the visual input
+            batch["visual_pos"] = torch.ones((36, 4))
+            batch["visual_feats"] = torch.ones((36, 2048))
+
+            # encode targets
+            additional_kwargs = {}
+            if phoneme_language is not None:
+                additional_kwargs["phonemizer_lang"] = phoneme_language
+
+            batch["labels"] = tokenizer(batch["target_text"], **additional_kwargs).input_ids
+            return batch
+
+    remove_columns = next(iter(raw_datasets.values())).column_names
+    if not data_args.audio_only:
+        remove_columns.remove("visual_pos")
+        remove_columns.remove("visual_feats")
 
     with training_args.main_process_first(desc="dataset map preprocessing"):
         vectorized_datasets = raw_datasets.map(
             prepare_dataset,
-            remove_columns=next(iter(raw_datasets.values())).column_names,
+            remove_columns=remove_columns,
             num_proc=num_workers,
+            with_rank=True,
             desc="preprocess datasets",
         )
 
@@ -782,4 +816,5 @@ def main():
 
 
 if __name__ == "__main__":
+    set_start_method("spawn")
     main()
