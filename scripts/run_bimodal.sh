@@ -22,4 +22,7 @@ CUDA_VISIBLE_DEVICES="1" python run_bimodal.py \
         --chars_to_ignore , ? . ! - \; \: \" “ % ‘ ” � \
         --fp16 \
         --group_by_length \
-        --do_train --do_eval \
+        --do_train --do_eval --do_predict \
+        --load_best_model_at_end \
+        --metric_for_best_model="eval_wer" \
+        --greater_is_better="False"

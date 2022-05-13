@@ -15,7 +15,6 @@
 
 """ Fine-tuning a 🤗 Transformers CTC model for automatic speech recognition"""
 
-import functools
 import json
 import logging
 import os
@@ -239,6 +238,12 @@ class DataTrainingArguments:
             " input audio to a sequence of phoneme sequences."
         },
     )
+    audio_only: Optional[bool] = field(
+        default=False,
+        metadata={
+            "help": "Whether or not to zero out visual inputs"
+        },
+    )
 
 
 @dataclass
@@ -326,9 +331,9 @@ def create_vocabulary_from_data(
     )
 
     # take union of all unique characters in each dataset
-    vocab_set = functools.reduce(
-        lambda vocab_1, vocab_2: set(vocab_1["vocab"][0]) | set(vocab_2["vocab"][0]), vocabs.values()
-    )
+    vocab_set = set()
+    for val in vocabs.values():
+        vocab_set.update(val["vocab"][0])
 
     vocab_dict = {v: k for k, v in enumerate(sorted(list(vocab_set)))}
 
@@ -397,7 +402,12 @@ def main():
     set_seed(training_args.seed)
 
     # 1. First, let's load the dataset
-    raw_datasets = load_dataset("csv", data_files={"train": "datasets/HOW2/test.csv", "eval": "datasets/HOW2/test.csv"})
+    data_files = {
+            "train": "datasets/HOW2/test.csv",
+            "eval": "datasets/HOW2/test.csv",
+            "test": "datasets/HOW2/test.csv",
+    }
+    raw_datasets = load_dataset("csv", data_files=data_files)
 
     #if training_args.do_train:
     #    raw_datasets["train"] = load_dataset(
@@ -562,6 +572,7 @@ def main():
     # make sure that dataset decodes audio with correct sampling rate
     raw_datasets["train"] = raw_datasets["train"].cast_column("audio", datasets.features.Audio(sampling_rate=feature_extractor.sampling_rate))
     raw_datasets["eval"] = raw_datasets["eval"].cast_column("audio", datasets.features.Audio(sampling_rate=feature_extractor.sampling_rate))
+    raw_datasets["test"] = raw_datasets["test"].cast_column("audio", datasets.features.Audio(sampling_rate=feature_extractor.sampling_rate))
     #raw_datasets["train"] = raw_datasets["train"].cast_column("image", datasets.features.Image())
     #raw_datasets["eval"] = raw_datasets["eval"].cast_column("image", datasets.features.Image())
 
@@ -592,18 +603,22 @@ def main():
         batch["input_length"] = len(batch["input_values"])
 
         # run image through FRCNN
-        images, sizes, scales_yx = image_preprocess(batch["image"])
-        output_dict = frcnn(
-            images,
-            sizes,
-            scales_yx=scales_yx,
-            padding="max_detections",
-            max_detections=frcnn_cfg.max_detections,
-            return_tensors="pt",
-            location=frcnn_cfg.model.device,
-        )
-        batch["visual_pos"] = output_dict["normalized_boxes"][0]
-        batch["visual_feats"] = output_dict["roi_features"][0]
+        if data_args.audio_only:
+            batch["visual_pos"] = torch.ones((36, 4), device=frcnn_cfg.model.device)
+            batch["visual_feats"] = torch.ones((36, 2048), device=frcnn_cfg.model.device)
+        else:
+            images, sizes, scales_yx = image_preprocess(batch["image"])
+            output_dict = frcnn(
+                images,
+                sizes,
+                scales_yx=scales_yx,
+                padding="max_detections",
+                max_detections=frcnn_cfg.max_detections,
+                return_tensors="pt",
+                location=frcnn_cfg.model.device,
+            )
+            batch["visual_pos"] = output_dict["normalized_boxes"][0]
+            batch["visual_feats"] = output_dict["roi_features"][0]
 
         # encode targets
         additional_kwargs = {}
@@ -723,7 +738,6 @@ def main():
         trainer.save_state()
 
     # Evaluation
-    results = {}
     if training_args.do_eval:
         logger.info("*** Evaluate ***")
         metrics = trainer.evaluate()
@@ -734,6 +748,18 @@ def main():
 
         trainer.log_metrics("eval", metrics)
         trainer.save_metrics("eval", metrics)
+    
+    # Testing
+    if training_args.do_predict:
+        logger.info("*** Test ***")
+        _, _, metrics = trainer.predict(vectorized_datasets["test"])
+        #max_eval_samples = (
+        #    data_args.max_eval_samples if data_args.max_eval_samples is not None else len(vectorized_datasets["eval"])
+        #)
+        #metrics["eval_samples"] = min(max_eval_samples, len(vectorized_datasets["eval"]))
+
+        trainer.log_metrics("test", metrics)
+        trainer.save_metrics("test", metrics)
 
     # Write model card and (optionally) push to hub
     config_name = data_args.dataset_config_name if data_args.dataset_config_name is not None else "na"
@@ -752,7 +778,7 @@ def main():
     else:
         trainer.create_model_card(**kwargs)
 
-    return results
+    return {}
 
 
 if __name__ == "__main__":
